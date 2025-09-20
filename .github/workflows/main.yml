@@ -1,4 +1,4 @@
-name: 'Terraform CI/CD de Base de Datos MySQL en GCP'
+name: 'Terraform y Carga de Datos en GCP'
 
 on:
   push:
@@ -9,19 +9,18 @@ on:
       - main
 
 jobs:
-  # ------ JOB PARA INFRACOST ------
-  # Se ejecuta solo en Pull Requests para mostrar el impacto de los costos antes de fusionar.
+  # ------ JOB PARA INFRACOST (se mantiene igual) ------
   infracost:
     name: 'Análisis de Costos con Infracost'
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write # Permiso para escribir comentarios en el PR
+      pull-requests: write
     
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Infracost
         uses: infracost/actions/setup@v2
@@ -32,41 +31,80 @@ jobs:
         uses: infracost/actions/comment@v2
         with:
           path: ./terraform
-          # Se usa la bandera corregida 'terraform-var-file' (singular).
-          terraform-var-file: terraform.tfvars
           behavior: update
 
-  # ------ JOB PARA APLICAR CAMBIOS ------
-  # Se ejecuta solo cuando se hace push (o se fusiona un PR) a la rama 'main'.
+  # ------ JOB PARA APLICAR CAMBIOS CON TERRAFORM ------
   terraform-apply:
     name: 'Apply Terraform'
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Define una salida 'db_ip' para que otros trabajos puedan usarla
+    outputs:
+      db_ip: ${{ steps.export-outputs.outputs.db_ip }}
     
     defaults:
       run:
         working-directory: ./terraform
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Google Auth
-      id: auth
-      uses: 'google-github-actions/auth@v1'
-      with:
-        credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Google Auth
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
 
-    - name: Terraform Init
-      run: terraform init
+      - name: Terraform Init
+        run: terraform init
 
-    - name: Terraform Apply
-      run: terraform apply -auto-approve
-      # --- CORRECCIÓN CRÍTICA AÑADIDA AQUÍ ---
-      # Pasa el secret de la contraseña de la BD como una variable de entorno.
-      # Esto evita que el 'apply' se quede esperando una entrada manual.
-      env:
-        TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+
+      # NUEVO PASO: Lee la salida de Terraform y la expone
+      - name: Export Terraform Outputs
+        id: export-outputs
+        run: |
+          # Extrae el valor del output y lo asigna a una salida del job
+          ip_address=$(terraform output -raw db_instance_ip)
+          echo "db_ip=$ip_address" >> $GITHUB_OUTPUT
+
+  # ------ NUEVO JOB PARA CARGAR LOS DATOS ------
+  load-data:
+    name: 'Cargar Datos a MySQL'
+    # Se ejecuta solo si el job 'terraform-apply' ha terminado con éxito
+    needs: terraform-apply
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas mysql-connector-python
+
+      - name: Run create and load script
+        run: python crear_y_cargar.py
+        env:
+          # Lee la IP desde la salida del job anterior, ¡ya no es fija!
+          DB_HOST: ${{ needs.terraform-apply.outputs.db_ip }}
+          # El resto de secretos se mantienen igual
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_DATABASE: ${{ secrets.DB_DATABASE }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          CSV_FILENAME: 'ai_job_dataset.csv' # Puedes hardcodearlo o convertirlo en input si quieres
+          TABLE_NAME: 'jobs'               # También puedes hardcodearlo aquí
