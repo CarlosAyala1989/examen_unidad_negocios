@@ -16,7 +16,7 @@ provider "google" {
 
 // Recurso: Instancia de Cloud SQL para MySQL
 resource "google_sql_database_instance" "mysql_instance" {
-  name             = "Bases De Datos en MySQL"
+  name             = "bases-de-datos-mysql"
   database_version = "MYSQL_8_0"
   region           = var.gcp_region
 
