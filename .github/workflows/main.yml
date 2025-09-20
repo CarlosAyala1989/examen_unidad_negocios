@@ -11,6 +11,7 @@ on:
 jobs:
   # ------ JOB PARA INFRACOST (sin cambios) ------
   infracost:
+    # ... (este job no necesita cambios) ...
     name: 'Análisis de Costos con Infracost'
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -33,13 +34,13 @@ jobs:
           path: ./terraform
           behavior: update
 
-  # ------ JOB PARA APLICAR CAMBIOS CON TERRAFORM ------
+  # ------ JOB PARA APLICAR CAMBIOS Y EXPORTAR LA IP ------
   terraform-apply:
-    name: 'Apply Terraform'
+    name: 'Apply Terraform and Get IP'
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
-      db_ip: ${{ steps.export-outputs.outputs.db_ip }}
+      db_ip: ${{ steps.apply-and-export.outputs.db_ip }}
     
     defaults:
       run:
@@ -60,37 +61,33 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
-      # --- SECCIÓN MODIFICADA ---
-      - name: Terraform Apply
-        id: apply
+      # --- PASO UNIFICADO Y CORREGIDO ---
+      - name: Apply and Export Outputs
+        id: apply-and-export
         run: |
-          # Intenta ejecutar 'apply' y guarda toda la salida (stdout y stderr) en un archivo.
-          # El '!' invierte el resultado, por lo que el bloque 'if' se ejecuta si el comando falla.
+          # Intenta ejecutar 'apply'. Si falla, revisa el motivo.
           if ! terraform apply -auto-approve -no-color &> terraform_output.log; then
             echo "Terraform apply falló. Verificando si el error es porque la instancia ya existe..."
-            # Busca el texto "instanceAlreadyExists" en la salida guardada.
-            # '-q' hace que grep sea silencioso y no imprima nada.
             if grep -q "instanceAlreadyExists" terraform_output.log; then
-              echo "Error aceptable: La instancia ya existe. El workflow continuará."
-              # Salimos con código 0 (éxito) para que GitHub Actions continúe.
-              exit 0
+              echo "Error aceptable: La instancia ya existe. El estado de Terraform se refrescará."
+              # Terraform refresca el estado incluso en este fallo, así que el output estará disponible.
             else
               echo "Error crítico de Terraform. El workflow se detendrá."
-              # Muestra el error completo para facilitar la depuración.
               cat terraform_output.log
-              # Salimos con código 1 (fallo) para detener el workflow.
               exit 1
             fi
           fi
+          
+          # Después de un 'apply' exitoso o un fallo controlado, obtenemos la IP.
+          echo "Extrayendo la IP de la base de datos..."
+          ip_address=$(terraform output -raw db_instance_ip)
+          echo "La IP obtenida es: $ip_address"
+          
+          # Asigna la IP a la salida del job para que el siguiente trabajo pueda usarla.
+          echo "db_ip=$ip_address" >> $GITHUB_OUTPUT
         env:
           TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
       
-      - name: Export Terraform Outputs
-        id: export-outputs
-        run: |
-          ip_address=$(terraform output -raw db_instance_ip)
-          echo "db_ip=$ip_address" >> $GITHUB_OUTPUT
-
   # ------ JOB PARA CARGAR LOS DATOS (sin cambios) ------
   load-data:
     name: 'Cargar Datos a MySQL'
